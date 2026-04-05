@@ -1,17 +1,28 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use chrono::Utc;
 
 #[derive(Serialize, Deserialize, Clone)]
+struct HeartbeatRequest {
+    pc_name: String,
+    ip: String,
+    status: String,
+    timestamp: u64,
+}
+
+#[derive(Serialize, Clone)]
 struct ClientInfo {
     ip: String,
     status: String,
     pc_name: String,
+    last_seen: String,
 }
 
 #[derive(Clone)]
 struct AppState {
-    clients: Arc<Mutex<Vec<ClientInfo>>>,
+    clients: Arc<Mutex<HashMap<String, ClientInfo>>>,
 }
 
 async fn index() -> impl Responder {
@@ -55,9 +66,7 @@ async fn index() -> impl Responder {
             margin: 0 10px;
             font-weight: bold;
         }
-        .nav-link:hover {
-            color: #f74c06;
-        }
+        .nav-link:hover { color: #f74c06; }
     </style>
 </head>
 <body>
@@ -66,22 +75,41 @@ async fn index() -> impl Responder {
         <a href="/clients" class="nav-link">Клиенты</a>
     </nav>
     <h1>🦀 Hello from Rust!</h1>
-    <p>Powered by Actix Web</p>
+    <p>Сервер мониторинга клиентов</p>
     <a href="/clients" class="badge">Смотреть клиентов</a>
 </body>
 </html>
         "#)
 }
 
+async fn heartbeat(data: web::Data<AppState>, info: web::Json<HeartbeatRequest>) -> impl Responder {
+    let mut clients = data.clients.lock().unwrap();
+    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    
+    clients.insert(info.pc_name.clone(), ClientInfo {
+        ip: info.ip.clone(),
+        status: "Online".to_string(),
+        pc_name: info.pc_name.clone(),
+        last_seen: now,
+    });
+
+    HttpResponse::Ok().json(serde_json::json!({"status": "ok"}))
+}
+
 async fn clients_page(data: web::Data<AppState>) -> impl Responder {
     let clients = data.clients.lock().unwrap();
     let mut rows = String::new();
-    for client in clients.iter() {
+    
+    for (_, client) in clients.iter() {
         let status_class = if client.status == "Online" { "status-online" } else { "status-offline" };
         rows.push_str(&format!(
-            r#"<tr><td>{}</td><td><span class="{}">{}</span></td><td>{}</td></tr>"#,
-            client.ip, status_class, client.status, client.pc_name
+            r#"<tr><td>{}</td><td><span class="{}">{}</span></td><td>{}</td><td>{}</td></tr>"#,
+            client.ip, status_class, client.status, client.pc_name, client.last_seen
         ));
+    }
+
+    if rows.is_empty() {
+        rows = r#"<tr><td colspan="4" style="text-align:center;">Нет активных клиентов. Запустите клиентское приложение.</td></tr>"#.to_string();
     }
 
     HttpResponse::Ok().content_type("text/html; charset=utf-8").body(format!(
@@ -92,6 +120,7 @@ async fn clients_page(data: web::Data<AppState>) -> impl Responder {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Клиенты</title>
+    <meta http-equiv="refresh" content="10">
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -104,7 +133,7 @@ async fn clients_page(data: web::Data<AppState>) -> impl Responder {
             align-items: center;
         }}
         h1 {{ margin-top: 2rem; }}
-        table {{ border-collapse: collapse; width: 80%; margin: 2rem auto; background: rgba(255, 255, 255, 0.05); border-radius: 8px; overflow: hidden; }}
+        table {{ border-collapse: collapse; width: 90%; margin: 2rem auto; background: rgba(255, 255, 255, 0.05); border-radius: 8px; overflow: hidden; }}
         th, td {{ border: 1px solid #333; padding: 1rem; text-align: left; }}
         th {{ background-color: #0f172a; color: #f74c06; }}
         tr:nth-child(even) {{ background-color: rgba(255, 255, 255, 0.02); }}
@@ -124,13 +153,15 @@ async fn clients_page(data: web::Data<AppState>) -> impl Responder {
         <a href="/" class="nav-link">Главная</a>
         <a href="/clients" class="nav-link">Клиенты</a>
     </nav>
-    <h1>👥 Список клиентов</h1>
+    <h1>👥 Активные клиенты</h1>
+    <p style="color: #888;">Страница обновляется каждые 10 секунд</p>
     <table>
         <thead>
             <tr>
                 <th>IP Адрес</th>
                 <th>Статус</th>
                 <th>Имя ПК</th>
+                <th>Последний сигнал</th>
             </tr>
         </thead>
         <tbody>
@@ -152,11 +183,7 @@ async fn main() -> std::io::Result<()> {
         .expect("PORT must be a number");
 
     let app_state = AppState {
-        clients: Arc::new(Mutex::new(vec![
-            ClientInfo { ip: "192.168.1.10".to_string(), status: "Online".to_string(), pc_name: "DESKTOP-01".to_string() },
-            ClientInfo { ip: "192.168.1.15".to_string(), status: "Offline".to_string(), pc_name: "LAPTOP-DEV".to_string() },
-            ClientInfo { ip: "10.0.0.5".to_string(), status: "Online".to_string(), pc_name: "SERVER-MAIN".to_string() },
-        ])),
+        clients: Arc::new(Mutex::new(HashMap::new())),
     };
 
     println!("🚀 Starting server on port {}...", port);
@@ -166,6 +193,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(app_state.clone()))
             .route("/", web::get().to(index))
             .route("/clients", web::get().to(clients_page))
+            .route("/api/heartbeat", web::post().to(heartbeat))
     })
     .bind(("0.0.0.0", port))?
     .run()
